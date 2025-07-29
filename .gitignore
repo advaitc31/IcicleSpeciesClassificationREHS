@@ -1,0 +1,20 @@
+# Ignore entire folders
+ckpts/
+lib/
+ott3.3/
+
+# Ignore specific files at root
+environment.yml
+setup_env.ipynb
+ott_taxonomy.csv
+ott3.3.tgz
+node_community_map.json
+
+# Ignore everything inside data/iwildcam_v2.0/
+data/iwildcam_v2.0/*
+
+# But keep these two specific files inside data/iwildcam_v2.0/
+!data/iwildcam_v2.0/entity2id_subtree.json
+!data/iwildcam_v2.0/overall_id_to_name.json
+
+
