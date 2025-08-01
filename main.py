@@ -15,6 +15,10 @@ import math
 import torchvision.transforms as transforms
 from torch.utils.tensorboard import SummaryWriter
 
+import model
+import importlib
+
+importlib.reload(model)
 
 from model import DistMult
 from resnet import Resnet18, Resnet50
@@ -356,41 +360,14 @@ def generate_target_list(data, entity2id):
     print("No. of target categories = {}".format(len(categories)))
     return torch.tensor(categories, dtype=torch.long).unsqueeze(-1)
 
-def main():
-    
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--data-dir', type=str, default='iwildcam_v2.0/')
-    parser.add_argument('--img-dir', type=str, default='iwildcam_v2.0/imgs/')
-    parser.add_argument('--batch_size', type=int, default=16)
-    parser.add_argument('--n_epochs', type=int, default=12)
-    parser.add_argument('--lr', type=float, default=1e-3, help='default lr for all parameters')
-    parser.add_argument('--loc-lr', type=float, default=1e-3, help='lr for location embedding')
-    parser.add_argument('--time-lr', type=float, default=1e-3, help='lr for time embedding')
-    parser.add_argument('--weight_decay', type=float, default=0.0)
-    parser.add_argument('--device', type=int, nargs='+', default=[0])
-    parser.add_argument('--seed', type=int, default=813765)
-    parser.add_argument('--save-dir', type=str, default='ckpts/toy/')
-    parser.add_argument('--ckpt-path', type=str, default=None, help='path to ckpt for restarting expt')
-    parser.add_argument('--start-epoch', type=int, default=0, help='epoch id to restore model')
-    parser.add_argument('--early-stopping-patience', type=int, default=5, help='early stop if metric does not improve for x epochs')
-    parser.add_argument('--debug', action='store_true')
-    parser.add_argument('--no-cuda', action='store_true')
+class AttrDict(dict):
+    """ Dictionary that allows attribute access. """
+    def __init__(self, *args, **kwargs):
+        super(AttrDict, self).__init__(*args, **kwargs)
+        self.__dict__ = self
 
-    parser.add_argument('--embedding-dim', type=int, default=512)
-    parser.add_argument('--location_input_dim', type=int, default=2)
-    parser.add_argument('--time_input_dim', type=int, default=1)
-    parser.add_argument('--mlp_location_numlayer', type=int, default=3)
-    parser.add_argument('--mlp_time_numlayer', type=int, default=3)
-    
-    parser.add_argument('--img-embed-model', choices=['resnet18', 'resnet50'], default='resnet50')
-    parser.add_argument('--use-data-subset', action='store_true')
-    parser.add_argument('--subset-size', type=int, default=10)
-
-    parser.add_argument('--add-id-id', action='store_true', help='add idtoid triples in addition to other triples for training')
-    parser.add_argument('--add-image-location', action='store_true', help='add imagetolocation triples in addition to other triples for training')
-    parser.add_argument('--add-image-time', action='store_true', help='use only imagetotime triples in addition to other triples for training')
-
-    args = parser.parse_args()
+def run_training(args_dict):
+    args = AttrDict(args_dict)
 
     print('args = {}'.format(args))
     args.device = torch.device('cuda') if not args.no_cuda and torch.cuda.is_available() else torch.device('cpu')
@@ -403,113 +380,56 @@ def main():
     writer = SummaryWriter(log_dir=args.save_dir)
 
     datacsv = pd.read_csv(os.path.join(args.data_dir, 'dataset_subtree.csv'), low_memory=False)
-
     entity_id_file = os.path.join(args.data_dir, 'entity2id_subtree.json')
 
     if not os.path.exists(entity_id_file):
-        entity2id = {} # each of triple types have their own entity2id
-        
+        entity2id = {}
         for i in tqdm(range(datacsv.shape[0])):
             if datacsv.iloc[i,1] == "id":
                 _get_id(entity2id, str(int(float(datacsv.iloc[i,0]))))
-
             if datacsv.iloc[i,-2] == "id":
                 _get_id(entity2id, str(int(float(datacsv.iloc[i,-3]))))
         json.dump(entity2id, open(entity_id_file, 'w'))
     else:
         entity2id = json.load(open(entity_id_file, 'r'))
-    
+
     num_ent_id = len(entity2id)
-
-    print('len(entity2id) = {}'.format(len(entity2id)))
-
+    print('len(entity2id) = {}'.format(num_ent_id))
     target_list = generate_target_list(datacsv, entity2id)
 
+    # Datasets
     train_image_to_id_dataset = iWildCamOTTDataset(datacsv, 'train', args, entity2id, target_list, head_type="image", tail_type="id")
-    print('len(train_image_to_id_dataset) = {}'.format(len(train_image_to_id_dataset)))
-
     if args.add_id_id:
         train_id_to_id_dataset = iWildCamOTTDataset(datacsv, 'train', args, entity2id, target_list, head_type="id", tail_type="id")
-        print('len(train_id_to_id_dataset) = {}'.format(len(train_id_to_id_dataset)))
-
     if args.add_image_location:
         train_image_to_location_dataset = iWildCamOTTDataset(datacsv, 'train', args, entity2id, target_list, head_type="image", tail_type="location")
-        print('len(train_image_to_location_dataset) = {}'.format(len(train_image_to_location_dataset)))
-
     if args.add_image_time:
         train_image_to_time_dataset = iWildCamOTTDataset(datacsv, 'train', args, entity2id, target_list, head_type="image", tail_type="time")
-        print('len(train_image_to_time_dataset) = {}'.format(len(train_image_to_time_dataset)))
-
     val_image_to_id_dataset = iWildCamOTTDataset(datacsv, 'val', args, entity2id, target_list, head_type="image", tail_type="id")
-    print('len(val_image_to_id_dataset) = {}'.format(len(val_image_to_id_dataset)))
 
-    
-    train_loader_image_to_id = DataLoader(
-        train_image_to_id_dataset,
-        shuffle=True, # Shuffle training dataset
-        sampler=None,
-        batch_size=args.batch_size,
-        num_workers=4,
-        pin_memory=True)
-
+    # DataLoaders
+    train_loaders = {
+        'image_to_id': DataLoader(train_image_to_id_dataset, shuffle=True, batch_size=args.batch_size, num_workers=4, pin_memory=True)
+    }
     if args.add_id_id:
-        train_loader_id_to_id = DataLoader(
-            train_id_to_id_dataset,
-            shuffle=True, # Shuffle training dataset
-            sampler=None,
-            batch_size=args.batch_size,
-            num_workers=4,
-            pin_memory=True)
-
+        train_loaders['id_to_id'] = DataLoader(train_id_to_id_dataset, shuffle=True, batch_size=args.batch_size, num_workers=4, pin_memory=True)
     if args.add_image_location:
-        train_loader_image_to_location = DataLoader(
-            train_image_to_location_dataset,
-            shuffle=True, # Shuffle training dataset
-            sampler=None,
-            batch_size=args.batch_size,
-            num_workers=4,
-            pin_memory=True)
-
+        train_loaders['image_to_location'] = DataLoader(train_image_to_location_dataset, shuffle=True, batch_size=args.batch_size, num_workers=4, pin_memory=True)
     if args.add_image_time:
-        train_loader_image_to_time = DataLoader(
-            train_image_to_time_dataset,
-            shuffle=True, # Shuffle training dataset
-            sampler=None,
-            batch_size=args.batch_size,
-            num_workers=4,
-            pin_memory=True)
+        train_loaders['image_to_time'] = DataLoader(train_image_to_time_dataset, shuffle=True, batch_size=args.batch_size, num_workers=4, pin_memory=True)
 
-    train_loaders = {}
-    
-    train_loaders['image_to_id'] = train_loader_image_to_id
+    val_loader = DataLoader(val_image_to_id_dataset, shuffle=False, batch_size=args.batch_size, num_workers=4, pin_memory=True)
 
-    if args.add_id_id:
-        train_loaders['id_to_id'] = train_loader_id_to_id
-
-    if args.add_image_location:
-        train_loaders['image_to_location'] = train_loader_image_to_location
-
-    if args.add_image_time:
-        train_loaders['image_to_time'] = train_loader_image_to_time
-
-    val_loader = DataLoader(
-        val_image_to_id_dataset,
-        shuffle=False, # Do not shuffle eval datasets
-        sampler=None,
-        batch_size=args.batch_size,
-        num_workers=4,
-        pin_memory=True)
-
+    # Model
     if args.add_image_time:
         model = DistMult(args, num_ent_id, target_list, args.device, train_image_to_id_dataset.all_locs, all_timestamps=train_image_to_time_dataset.all_timestamps)
     else:
         model = DistMult(args, num_ent_id, target_list, args.device, train_image_to_id_dataset.all_locs)
-
     model.to(args.device)
-    
-    early_stopping = EarlyStopping(patience=args.early_stopping_patience, verbose=True, ckpt_path=os.path.join(args.save_dir, 'model.pt'), best_ckpt_path=os.path.join(args.save_dir, 'best_model.pt'))
 
-    params = filter(lambda p: p.requires_grad, model.parameters())
+    early_stopping = EarlyStopping(patience=args.early_stopping_patience, verbose=True,
+                                   ckpt_path=os.path.join(args.save_dir, 'model.pt'),
+                                   best_ckpt_path=os.path.join(args.save_dir, 'best_model.pt'))
 
     optimizer = optim.Adam(
         [
@@ -522,7 +442,6 @@ def main():
         lr=args.lr,
         weight_decay=args.weight_decay)
 
-    # restore from ckpt
     if args.ckpt_path:
         print('ckpt loaded...')
         ckpt = torch.load(args.ckpt_path)
@@ -532,10 +451,7 @@ def main():
     for epoch_id in range(args.start_epoch, args.n_epochs):
         print('\nEpoch [%d]:\n' % epoch_id)
 
-        # First run training
         train(model, train_loaders, optimizer, epoch_id, writer, args)
-
-        # Then run val
         val_results, y_pred = evaluate(model, val_loader, optimizer, early_stopping, epoch_id, writer, args)
 
         if early_stopping.early_stop:
@@ -544,5 +460,3 @@ def main():
 
     writer.close()
 
-if __name__=='__main__':
-    main()
